@@ -3,7 +3,7 @@ import { Link, useSearchParams } from "react-router-dom";
 import { api, type Listing, type WatchItem } from "../api";
 import ListingsTable from "../components/ListingsTable";
 
-type SortKey = "newest" | "price-low" | "price-high" | "discount";
+type SortKey = "best-match" | "relevance" | "newest" | "price-low" | "price-high" | "discount";
 
 export default function Listings() {
   const [searchParams] = useSearchParams();
@@ -17,7 +17,7 @@ export default function Listings() {
   const [search, setSearch] = useState("");
   const [maxPrice, setMaxPrice] = useState("");
   const [localOnly, setLocalOnly] = useState(false);
-  const [sort, setSort] = useState<SortKey>("newest");
+  const [sort, setSort] = useState<SortKey>("best-match");
 
   const load = useCallback(async () => {
     try {
@@ -81,6 +81,16 @@ export default function Listings() {
 
     // Sort
     switch (sort) {
+      case "best-match":
+        result = [...result].sort(
+          (a, b) => (b.final_score ?? 0) - (a.final_score ?? 0)
+        );
+        break;
+      case "relevance":
+        result = [...result].sort(
+          (a, b) => (b.relevance_score ?? 0) - (a.relevance_score ?? 0)
+        );
+        break;
       case "price-low":
         result = [...result].sort((a, b) => a.price - b.price);
         break;
@@ -184,6 +194,8 @@ export default function Listings() {
           onChange={(e) => setSort(e.target.value as SortKey)}
           className="px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
         >
+          <option value="best-match">Best match (relevance × price)</option>
+          <option value="relevance">Match score</option>
           <option value="newest">Newest first</option>
           <option value="price-low">Price: low to high</option>
           <option value="price-high">Price: high to low</option>

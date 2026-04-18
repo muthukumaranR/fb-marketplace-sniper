@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     great_deal_threshold: float = 0.60
     good_deal_threshold: float = 0.75
 
+    # Relevance gating: skip notifications when relevance falls below this.
+    # Scored listings with score < threshold are still persisted — just not emailed.
+    notify_min_relevance: float = 0.5
+
     # Facebook
     fb_state_path: str = "~/.config/sniper/fb_state.json"
 

@@ -1,11 +1,20 @@
 import asyncio
+import json
 
 from loguru import logger
 
 from backend import db
 from backend.celery_app import app
+from backend.config import settings
 from backend.notifier import send_deal_email
 from backend.pricer import evaluate_deal, get_fair_price
+from backend.relevance import (
+    FacetSpec,
+    combine_scores,
+    extract_query_facets,
+    price_score,
+    score_listing,
+)
 from backend.scraper_fb import scrape_fb_marketplace
 
 
@@ -64,10 +73,21 @@ async def _scan_single_item(item: dict) -> tuple[int, int]:
     name = item["name"]
     location = item["location"]
     radius = item["radius"]
+    max_price = item.get("max_price")
 
     # Get fair price
     price_est = await get_fair_price(name)
     fair_price = price_est.median_price
+
+    # Extract facets once per watch item (cached after first LLM call)
+    facet_spec: FacetSpec | None = None
+    try:
+        facet_spec = await extract_query_facets(name)
+    except Exception as e:
+        logger.warning(
+            "Facet extraction failed for '{}': {} — continuing without relevance scoring",
+            name, e,
+        )
 
     # Scrape FB
     fb_listings = await scrape_fb_marketplace(name, location, radius)
@@ -79,9 +99,30 @@ async def _scan_single_item(item: dict) -> tuple[int, int]:
         deal_quality, discount_pct = evaluate_deal(fl.price, fair_price)
 
         # Check max_price constraint too
-        if item.get("max_price") and fl.price > item["max_price"]:
+        if max_price and fl.price > max_price:
             deal_quality = "none"
             discount_pct = 0.0
+
+        # Relevance scoring (title-only for now; description not in scraper output).
+        # Skip when facet list is empty — the LLM gave us no structured signal, so
+        # treat relevance as unknown (None) rather than zero, letting price rule.
+        relevance_val: float | None = None
+        match_details_json: str | None = None
+        rejected = False
+        if facet_spec is not None and facet_spec.facets:
+            match = score_listing(facet_spec, fl.title, price=fl.price, max_price=max_price)
+            relevance_val = match.score
+            match_details_json = json.dumps(match.to_dict())
+            rejected = match.rejected
+
+        # If rejected (required facet miss or price cap), don't show misleading deal
+        # badges — the listing is either the wrong item or over budget.
+        if rejected:
+            deal_quality = "none"
+            discount_pct = 0.0
+
+        p_score = price_score(fl.price, fair_price)
+        final_sc = combine_scores(relevance_val, p_score)
 
         result = await db.upsert_listing(
             fb_id=fl.fb_id,
@@ -94,6 +135,9 @@ async def _scan_single_item(item: dict) -> tuple[int, int]:
             deal_quality=deal_quality,
             thumbnail=fl.thumbnail,
             location=fl.location,
+            relevance_score=relevance_val,
+            final_score=final_sc,
+            match_details=match_details_json,
         )
 
         if result is None:
@@ -103,6 +147,14 @@ async def _scan_single_item(item: dict) -> tuple[int, int]:
 
         if deal_quality in ("great", "good"):
             deals_found += 1
+            # Gate notifications by relevance — skip emails when the title
+            # clearly doesn't match the watch item. Fail open if unscored.
+            if relevance_val is not None and relevance_val < settings.notify_min_relevance:
+                logger.info(
+                    "Suppressing {} email for low-relevance listing '{}' (score={})",
+                    deal_quality, fl.title, relevance_val,
+                )
+                continue
             try:
                 send_deal_email(
                     item_name=name,

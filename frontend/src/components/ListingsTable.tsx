@@ -7,6 +7,24 @@ interface Props {
   compact?: boolean;
 }
 
+function relevanceBadge(score: number): { bg: string; label: string } {
+  const pct = Math.round(score * 100);
+  if (score >= 0.75) return { bg: "bg-emerald-100 text-emerald-700", label: `${pct}% match` };
+  if (score >= 0.5) return { bg: "bg-lime-100 text-lime-700", label: `${pct}% match` };
+  if (score > 0) return { bg: "bg-gray-100 text-gray-500", label: `${pct}% match` };
+  return { bg: "bg-gray-100 text-gray-400", label: "no match" };
+}
+
+function matchTooltip(l: Listing): string | undefined {
+  const d = l.match_details;
+  if (!d) return undefined;
+  const parts: string[] = [];
+  if (d.rejected && d.reject_reason) parts.push(`Rejected: ${d.reject_reason}`);
+  if (d.matched.length) parts.push(`Matched: ${d.matched.join(", ")} ✓`);
+  if (d.missed.length) parts.push(`Missed: ${d.missed.join(", ")} ✗`);
+  return parts.join("\n") || undefined;
+}
+
 const dealStyles: Record<string, { border: string; bg: string; badge: string; label: string }> = {
   great: {
     border: "border-red-200",
@@ -84,7 +102,7 @@ export default function ListingsTable({
 
             {/* Info */}
             <div className="flex-1 min-w-0">
-              {/* Watch item tag + deal badge */}
+              {/* Watch item tag + deal badge + match badge */}
               <div className="flex items-center gap-2 mb-1 flex-wrap">
                 {showItemName && (
                   <span className="px-2 py-0.5 rounded-full text-xs font-medium bg-indigo-100 text-indigo-700">
@@ -96,6 +114,17 @@ export default function ListingsTable({
                     {style.label}
                   </span>
                 )}
+                {l.relevance_score != null && (() => {
+                  const rb = relevanceBadge(l.relevance_score);
+                  return (
+                    <span
+                      className={`px-2 py-0.5 rounded-full text-xs font-medium ${rb.bg} cursor-help`}
+                      title={matchTooltip(l)}
+                    >
+                      {rb.label}
+                    </span>
+                  );
+                })()}
               </div>
               <h3 className={`font-medium text-gray-900 ${compact ? "text-sm truncate" : "line-clamp-2"}`}>
                 {l.title}

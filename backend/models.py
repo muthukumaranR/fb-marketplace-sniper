@@ -1,7 +1,8 @@
+import json
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class DealQuality(str, Enum):
@@ -64,6 +65,16 @@ class Listing(BaseModel):
     location: str | None = None
     item_name: str
     first_seen: datetime
+    relevance_score: float | None = None
+    final_score: float | None = None
+    match_details: dict | None = None
+
+    @field_validator("match_details", mode="before")
+    @classmethod
+    def _parse_match_details(cls, v):
+        if isinstance(v, str):
+            return json.loads(v) if v else None
+        return v
 
 
 class PriceEstimate(BaseModel):

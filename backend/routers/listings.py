@@ -10,10 +10,12 @@ router = APIRouter(tags=["listings"])
 async def get_listings(
     item_name: str | None = None,
     deal_quality: str | None = None,
+    sort: str | None = None,
     limit: int = 100,
     offset: int = 0,
 ):
-    return await db.get_listings(item_name, deal_quality, limit, offset)
+    """sort ∈ {final, relevance, deal, price, recent}. Default: recent."""
+    return await db.get_listings(item_name, deal_quality, sort, limit, offset)
 
 
 @router.get("/dashboard", response_model=DashboardStats)

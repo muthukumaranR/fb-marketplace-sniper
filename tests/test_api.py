@@ -120,6 +120,59 @@ class TestListingsAPI:
                 assert resp.json() == []
         run(_test())
 
+    def test_sort_by_final_score(self):
+        async def _test():
+            # Seed three listings with ascending final_score
+            await db.upsert_listing(
+                fb_id="a", title="A", price=100, link="l", item_name="X",
+                relevance_score=0.2, final_score=0.1, match_details='{"score":0.2,"matched":[],"missed":["model"],"rejected":false}',
+            )
+            await db.upsert_listing(
+                fb_id="b", title="B", price=100, link="l", item_name="X",
+                relevance_score=0.9, final_score=0.9, match_details='{"score":0.9,"matched":["model"],"missed":[],"rejected":false}',
+            )
+            await db.upsert_listing(
+                fb_id="c", title="C", price=100, link="l", item_name="X",
+                relevance_score=0.5, final_score=0.4, match_details='{"score":0.5,"matched":["model"],"missed":["storage"],"rejected":false}',
+            )
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/api/listings?sort=final")
+                assert resp.status_code == 200
+                ids = [l["fb_id"] for l in resp.json()]
+                assert ids == ["b", "c", "a"]
+        run(_test())
+
+    def test_sort_by_relevance(self):
+        async def _test():
+            await db.upsert_listing(
+                fb_id="a", title="A", price=100, link="l", item_name="X", relevance_score=0.1, final_score=0.0,
+            )
+            await db.upsert_listing(
+                fb_id="b", title="B", price=100, link="l", item_name="X", relevance_score=0.9, final_score=0.0,
+            )
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/api/listings?sort=relevance")
+                ids = [l["fb_id"] for l in resp.json()]
+                assert ids == ["b", "a"]
+        run(_test())
+
+    def test_match_details_parsed(self):
+        async def _test():
+            await db.upsert_listing(
+                fb_id="a", title="iPhone 15 Pro 256GB", price=600, link="l", item_name="iPhone",
+                relevance_score=0.8, final_score=0.5,
+                match_details='{"score":0.8,"matched":["model","storage"],"missed":[],"rejected":false,"reject_reason":null}',
+            )
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                resp = await client.get("/api/listings")
+                data = resp.json()
+                assert len(data) == 1
+                md = data[0]["match_details"]
+                assert md["score"] == 0.8
+                assert md["matched"] == ["model", "storage"]
+                assert md["rejected"] is False
+        run(_test())
+
 
 class TestScansAPI:
     def test_empty_scans(self):

@@ -29,6 +29,14 @@ export interface WatchItem {
   created_at: string;
 }
 
+export interface MatchDetails {
+  score: number;
+  matched: string[];
+  missed: string[];
+  rejected: boolean;
+  reject_reason?: string | null;
+}
+
 export interface Listing {
   id: number;
   fb_id: string;
@@ -42,7 +50,12 @@ export interface Listing {
   location: string | null;
   item_name: string;
   first_seen: string;
+  relevance_score: number | null;
+  final_score: number | null;
+  match_details: MatchDetails | null;
 }
+
+export type ListingSort = "final" | "relevance" | "deal" | "price" | "recent";
 
 export interface PriceEstimate {
   item_name: string;
@@ -102,12 +115,14 @@ export const api = {
   getListings: (params?: {
     item_name?: string;
     deal_quality?: string;
+    sort?: ListingSort;
     limit?: number;
     offset?: number;
   }) => {
     const qs = new URLSearchParams();
     if (params?.item_name) qs.set("item_name", params.item_name);
     if (params?.deal_quality) qs.set("deal_quality", params.deal_quality);
+    if (params?.sort) qs.set("sort", params.sort);
     if (params?.limit) qs.set("limit", String(params.limit));
     if (params?.offset) qs.set("offset", String(params.offset));
     const q = qs.toString();
