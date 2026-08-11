@@ -4,7 +4,7 @@
 .env.*.local
 fb_state.json
 *_state.json
-~/.config/sniper/
+~/.config/marketswipe/
 
 # Python
 __pycache__/

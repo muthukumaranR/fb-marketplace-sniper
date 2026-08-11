@@ -29,6 +29,16 @@ export interface WatchItem {
   created_at: string;
 }
 
+export type ListingSort = "final" | "relevance" | "deal" | "price" | "recent";
+
+// Parsed shape of Listing.match_details, which arrives as a JSON-encoded string.
+export interface MatchDetails {
+  score: number;
+  matched: string[];
+  missed: string[];
+  excluded_by: string | null;
+}
+
 export interface Listing {
   id: number;
   fb_id: string;
@@ -42,6 +52,73 @@ export interface Listing {
   location: string | null;
   item_name: string;
   first_seen: string;
+  // Null on every listing scanned before relevance scoring shipped.
+  relevance_score: number | null;
+  final_score: number | null;
+  match_details: string | null;
+}
+
+// match_details is a JSON string, not an object. A malformed value degrades to
+// "no details" rather than taking the row down with it.
+export function parseMatchDetails(raw: string | null): MatchDetails | null {
+  if (!raw) return null;
+  try {
+    return JSON.parse(raw) as MatchDetails;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The API serializes naive datetimes with no timezone designator (e.g.
+ * "2026-08-11T01:23:09") but the values are UTC — SQLite's datetime('now').
+ * `new Date()` would read them as local time, putting every timestamp hours off
+ * and pushing the next-scan countdown into the future. Treat a bare timestamp
+ * as UTC; leave anything already carrying an offset alone.
+ */
+export function parseApiDate(raw: string): Date {
+  const hasZone = /(?:Z|[+-]\d{2}:?\d{2})$/.test(raw);
+  return new Date(hasZone ? raw : `${raw}Z`);
+}
+
+// --- Derived score helpers ---
+//
+// Defined once here so the 0.3 deal gate has exactly one definition. The Deals
+// headline, the nav badge and the "worth acting on" list all read isDeal(); if
+// they diverge the page contradicts itself.
+
+export const DEAL_THRESHOLD = 0.3;
+
+/** Price attractiveness in [0,1]. Null when there is no fair-price estimate. */
+export function priceScore(l: Listing): number | null {
+  if (!l.fair_price || l.fair_price <= 0) return null;
+  return Math.max(0, Math.min(1, 1 - l.price / l.fair_price));
+}
+
+/**
+ * Recomputed from the same inputs the row displays, rather than read from the
+ * persisted `final_score` column. The backend computes the column identically
+ * at scan time, so for real data the two agree — but deriving it here keeps the
+ * "rel × price" factor line and the final bar from ever contradicting each
+ * other if the stored value drifts. The stored column is what the server sorts
+ * by; this is what the user sees.
+ */
+export function finalScore(l: Listing): number | null {
+  const p = priceScore(l);
+  if (l.relevance_score == null || p == null) return null;
+  return l.relevance_score * p;
+}
+
+export function isUnscored(l: Listing): boolean {
+  return l.relevance_score == null;
+}
+
+export function isExcluded(l: Listing): boolean {
+  return !!parseMatchDetails(l.match_details)?.excluded_by;
+}
+
+export function isDeal(l: Listing): boolean {
+  return (finalScore(l) ?? 0) >= DEAL_THRESHOLD;
 }
 
 export interface PriceEstimate {
@@ -78,6 +155,8 @@ export interface SetupStatus {
   has_watch_items: boolean;
   has_scans: boolean;
   has_email: boolean;
+  scan_interval_minutes: number;
+  notify_min_relevance: number;
 }
 
 // API functions
@@ -104,12 +183,14 @@ export const api = {
     deal_quality?: string;
     limit?: number;
     offset?: number;
+    sort?: ListingSort;
   }) => {
     const qs = new URLSearchParams();
     if (params?.item_name) qs.set("item_name", params.item_name);
     if (params?.deal_quality) qs.set("deal_quality", params.deal_quality);
     if (params?.limit) qs.set("limit", String(params.limit));
     if (params?.offset) qs.set("offset", String(params.offset));
+    if (params?.sort) qs.set("sort", params.sort);
     const q = qs.toString();
     return request<Listing[]>(`/listings${q ? `?${q}` : ""}`);
   },

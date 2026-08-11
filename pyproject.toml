@@ -1,7 +1,7 @@
 [project]
-name = "fb-marketplace-sniper"
+name = "marketswipe"
 version = "0.1.0"
-description = "Facebook Marketplace deal sniper — find underpriced listings automatically"
+description = "MarketSwipe — find underpriced Facebook Marketplace listings automatically"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi>=0.115.0",

@@ -1,3 +1,8 @@
+# Pinned so the project name (and therefore the volume namespace holding the live
+# database) no longer depends on the directory name. Renaming the checkout used to
+# orphan marketswipe_app-data silently.
+name: marketswipe
+
 services:
   redis:
     image: redis:7-alpine
@@ -18,11 +23,11 @@ services:
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - DB_PATH=/app/data/sniper.db
+      - DB_PATH=/app/data/marketswipe.db
       - FB_STATE_PATH=/app/data/fb_state.json
     volumes:
       - app-data:/app/data
-      - ~/.config/sniper/fb_state.json:/app/data/fb_state.json:ro
+      - ~/.config/marketswipe/fb_state.json:/app/data/fb_state.json:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -34,11 +39,11 @@ services:
     env_file: .env
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - DB_PATH=/app/data/sniper.db
+      - DB_PATH=/app/data/marketswipe.db
       - FB_STATE_PATH=/app/data/fb_state.json
     volumes:
       - app-data:/app/data
-      - ~/.config/sniper/fb_state.json:/app/data/fb_state.json:ro
+      - ~/.config/marketswipe/fb_state.json:/app/data/fb_state.json:ro
     depends_on:
       redis:
         condition: service_healthy

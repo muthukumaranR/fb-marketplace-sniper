@@ -1,4 +1,4 @@
-"""Playwright UI tests for FB Marketplace Sniper."""
+"""Playwright UI tests for MarketSwipe."""
 
 import asyncio
 from playwright.async_api import async_playwright, Page, expect
@@ -15,7 +15,7 @@ async def test_dashboard_loads(page: Page):
 
     # Check nav is present
     nav_text = await page.text_content("nav")
-    assert "Marketplace Sniper" in nav_text, "Missing app title"
+    assert "MarketSwipe" in nav_text, "Missing app title"
     assert "Dashboard" in nav_text, "Missing Dashboard nav"
     assert "Watchlist" in nav_text, "Missing Watchlist nav"
     assert "Listings" in nav_text, "Missing Listings nav"
@@ -613,7 +613,7 @@ async def test_image_proxy(page: Page):
 
 
 async def main():
-    print("Starting Playwright UI tests for FB Marketplace Sniper")
+    print("Starting Playwright UI tests for MarketSwipe")
     print("=" * 60)
 
     async with async_playwright() as p:

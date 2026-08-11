@@ -4,7 +4,7 @@ from celery.schedules import crontab
 from backend.config import settings
 
 app = Celery(
-    "sniper",
+    "marketswipe",
     broker=settings.redis_url,
     backend=settings.redis_url,
     include=["backend.tasks"],

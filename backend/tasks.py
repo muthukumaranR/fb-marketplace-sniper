@@ -5,8 +5,15 @@ from loguru import logger
 from backend import db
 from backend.celery_app import app
 from backend.notifier import send_deal_email
+from backend.config import settings
 from backend.pricer import evaluate_deal, get_fair_price
-from backend.scraper_fb import scrape_fb_marketplace
+from backend.relevance import (
+    combine_scores,
+    extract_query_facets,
+    price_score,
+    score_listing,
+)
+from backend.scraper_fb import fetch_listing_descriptions, scrape_fb_marketplace
 
 
 def _run_async(coro):
@@ -59,6 +66,43 @@ async def _scan_all_async(scan_id: int | None = None):
     logger.info("Scan complete: {} items, {} new listings, {} deals", len(watch_items), total_new, total_deals)
 
 
+async def _fetch_candidate_descriptions(
+    fb_listings: list, spec, fair_price: float, item: dict
+) -> dict[str, str]:
+    """
+    Read the full listing body — but only where it can change the outcome.
+
+    A detail page per listing is a page load and a bot-detection risk, so this
+    skips listings already stored, already disqualified by title, or not priced
+    like a deal. Those keep their title-only score; nothing about them turns on
+    the body. What is left is exactly the set about to trigger an email, which
+    is where a "controller only" buried in the description matters.
+    """
+    candidates = [
+        fl for fl in fb_listings
+        if evaluate_deal(fl.price, fair_price)[0] in ("great", "good")
+        and not (item.get("max_price") and fl.price > item["max_price"])
+        and score_listing(fl.title, spec).score >= settings.notify_min_relevance
+    ]
+    if not candidates:
+        return {}
+
+    already_seen = await db.existing_fb_ids([fl.fb_id for fl in candidates])
+    to_fetch = [fl.fb_id for fl in candidates if fl.fb_id not in already_seen]
+    if not to_fetch:
+        return {}
+
+    logger.info(
+        "Reading full listing body for {} of {} results for '{}'",
+        len(to_fetch), len(fb_listings), item["name"],
+    )
+    try:
+        return await fetch_listing_descriptions(to_fetch)
+    except Exception as e:
+        logger.warning("Description fetch failed for '{}': {} — scoring on titles", item["name"], e)
+        return {}
+
+
 async def _scan_single_item(item: dict) -> tuple[int, int]:
     """Scan FB Marketplace for a single watchlist item. Returns (deals_found, new_listings)."""
     name = item["name"]
@@ -69,8 +113,13 @@ async def _scan_single_item(item: dict) -> tuple[int, int]:
     price_est = await get_fair_price(name)
     fair_price = price_est.median_price
 
+    # One LLM call per watch term, cached 30 days — scoring below is offline
+    spec = await extract_query_facets(name)
+
     # Scrape FB
     fb_listings = await scrape_fb_marketplace(name, location, radius)
+
+    descriptions = await _fetch_candidate_descriptions(fb_listings, spec, fair_price, item)
 
     deals_found = 0
     new_listings = 0
@@ -83,6 +132,9 @@ async def _scan_single_item(item: dict) -> tuple[int, int]:
             deal_quality = "none"
             discount_pct = 0.0
 
+        match = score_listing(fl.title, spec, descriptions.get(fl.fb_id))
+        final = combine_scores(match.score, price_score(fl.price, fair_price))
+
         result = await db.upsert_listing(
             fb_id=fl.fb_id,
             title=fl.title,
@@ -94,12 +146,25 @@ async def _scan_single_item(item: dict) -> tuple[int, int]:
             deal_quality=deal_quality,
             thumbnail=fl.thumbnail,
             location=fl.location,
+            relevance_score=match.score,
+            final_score=final,
+            match_details=match.as_json(),
         )
 
         if result is None:
             continue  # Already seen
 
         new_listings += 1
+
+        # A great price on the wrong item is not a deal. Persist it either way
+        # so it stays visible in the UI, but do not spend an email on it.
+        if match.score < settings.notify_min_relevance:
+            logger.info(
+                "Skipping notification for '{}' — relevance {:.2f} < {:.2f}{}",
+                fl.title, match.score, settings.notify_min_relevance,
+                f" (excluded by '{match.excluded_by}')" if match.excluded_by else "",
+            )
+            continue
 
         if deal_quality in ("great", "good"):
             deals_found += 1

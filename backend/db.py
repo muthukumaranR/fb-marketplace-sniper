@@ -42,6 +42,15 @@ CREATE TABLE IF NOT EXISTS price_cache (
     sold_prices TEXT
 );
 
+CREATE TABLE IF NOT EXISTS query_facets_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    query TEXT NOT NULL,
+    spec_json TEXT NOT NULL,
+    extracted_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_facets_query ON query_facets_cache(query);
+
 CREATE TABLE IF NOT EXISTS scans (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     started_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -55,9 +64,32 @@ CREATE TABLE IF NOT EXISTS scans (
 
 
 async def get_db() -> aiosqlite.Connection:
-    db = await aiosqlite.connect(DB_PATH)
+    # WAL lets the API read while a Celery worker writes; without it concurrent
+    # access raises "database is locked". busy_timeout makes contenders wait
+    # rather than fail instantly.
+    db = await aiosqlite.connect(DB_PATH, timeout=30.0)
     db.row_factory = aiosqlite.Row
+    await db.execute("PRAGMA journal_mode=WAL")
+    await db.execute("PRAGMA busy_timeout=30000")
     return db
+
+
+# Columns added after the initial schema shipped. SQLite has no
+# ADD COLUMN IF NOT EXISTS, so existing databases are migrated explicitly.
+_LISTING_MIGRATIONS = {
+    "relevance_score": "ALTER TABLE listings ADD COLUMN relevance_score REAL",
+    "final_score": "ALTER TABLE listings ADD COLUMN final_score REAL",
+    "match_details": "ALTER TABLE listings ADD COLUMN match_details TEXT",
+}
+
+
+async def _migrate_listings(db: aiosqlite.Connection):
+    rows = await db.execute_fetchall("PRAGMA table_info(listings)")
+    existing = {row["name"] for row in rows}
+    for column, ddl in _LISTING_MIGRATIONS.items():
+        if column not in existing:
+            logger.info("Migrating listings: adding column {}", column)
+            await db.execute(ddl)
 
 
 async def init_db():
@@ -65,6 +97,7 @@ async def init_db():
     db = await get_db()
     try:
         await db.executescript(SCHEMA)
+        await _migrate_listings(db)
         await db.commit()
         logger.info("Database initialized successfully")
     finally:
@@ -136,26 +169,43 @@ async def upsert_listing(
     deal_quality: str = "none",
     thumbnail: str | None = None,
     location: str | None = None,
+    relevance_score: float | None = None,
+    final_score: float | None = None,
+    match_details: str | None = None,
 ) -> dict | None:
     db = await get_db()
     try:
-        existing = await db.execute_fetchall(
-            "SELECT id FROM listings WHERE fb_id = ?", (fb_id,)
-        )
-        if existing:
-            return None  # already seen
-
+        # A SELECT-then-INSERT loses the race against a concurrent writer and
+        # raises IntegrityError, aborting the rest of the scan's listings. The
+        # UNIQUE index decides instead: no row inserted means someone else won.
         cursor = await db.execute(
             """INSERT INTO listings
-            (fb_id, title, price, fair_price, discount_pct, deal_quality, link, thumbnail, location, item_name)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (fb_id, title, price, fair_price, discount_pct, deal_quality, link, thumbnail, location, item_name),
+            (fb_id, title, price, fair_price, discount_pct, deal_quality, link, thumbnail, location,
+             item_name, relevance_score, final_score, match_details)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(fb_id) DO NOTHING""",
+            (fb_id, title, price, fair_price, discount_pct, deal_quality, link, thumbnail, location,
+             item_name, relevance_score, final_score, match_details),
         )
         await db.commit()
+        if cursor.rowcount == 0:
+            return None  # already seen
+
         rows = await db.execute_fetchall("SELECT * FROM listings WHERE id = ?", (cursor.lastrowid,))
-        return dict(rows[0])
+        return dict(rows[0]) if rows else None
     finally:
         await db.close()
+
+
+# Whitelisted so `sort` can never reach the query as user-controlled SQL.
+# NULLs last keeps pre-migration rows from squatting the top of scored sorts.
+SORT_CLAUSES = {
+    "final": "ORDER BY final_score IS NULL, final_score DESC",
+    "relevance": "ORDER BY relevance_score IS NULL, relevance_score DESC",
+    "deal": "ORDER BY discount_pct IS NULL, discount_pct DESC",
+    "price": "ORDER BY price ASC",
+    "recent": "ORDER BY first_seen DESC",
+}
 
 
 async def get_listings(
@@ -163,6 +213,7 @@ async def get_listings(
     deal_quality: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    sort: str = "recent",
 ) -> list[dict]:
     db = await get_db()
     try:
@@ -174,7 +225,7 @@ async def get_listings(
         if deal_quality:
             query += " AND deal_quality = ?"
             params.append(deal_quality)
-        query += " ORDER BY first_seen DESC LIMIT ? OFFSET ?"
+        query += f" {SORT_CLAUSES.get(sort, SORT_CLAUSES['recent'])} LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = await db.execute_fetchall(query, params)
         return [dict(r) for r in rows]
@@ -220,6 +271,52 @@ async def save_price_cache(
         await db.commit()
         rows = await db.execute_fetchall("SELECT * FROM price_cache WHERE id = ?", (cursor.lastrowid,))
         return dict(rows[0])
+    finally:
+        await db.close()
+
+
+async def existing_fb_ids(fb_ids: list[str]) -> set[str]:
+    """Which of these listings are already stored? One query, not N."""
+    if not fb_ids:
+        return set()
+    db = await get_db()
+    try:
+        placeholders = ",".join("?" * len(fb_ids))
+        rows = await db.execute_fetchall(
+            f"SELECT fb_id FROM listings WHERE fb_id IN ({placeholders})", fb_ids
+        )
+        return {row["fb_id"] for row in rows}
+    finally:
+        await db.close()
+
+
+# --- Facet cache ---
+
+
+async def get_cached_facets(query: str, max_age_days: int = 30) -> str | None:
+    """Return the cached spec JSON for a query, or None if absent/stale."""
+    db = await get_db()
+    try:
+        rows = await db.execute_fetchall(
+            """SELECT spec_json FROM query_facets_cache
+            WHERE query = ?
+            AND julianday('now') - julianday(extracted_at) < ?
+            ORDER BY extracted_at DESC LIMIT 1""",
+            (query, max_age_days),
+        )
+        return rows[0]["spec_json"] if rows else None
+    finally:
+        await db.close()
+
+
+async def save_facets_cache(query: str, spec_json: str) -> None:
+    db = await get_db()
+    try:
+        await db.execute(
+            "INSERT INTO query_facets_cache (query, spec_json) VALUES (?, ?)",
+            (query, spec_json),
+        )
+        await db.commit()
     finally:
         await db.close()
 

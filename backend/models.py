@@ -1,7 +1,7 @@
 from datetime import datetime
 from enum import Enum
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class DealQuality(str, Enum):
@@ -64,17 +64,37 @@ class Listing(BaseModel):
     location: str | None = None
     item_name: str
     first_seen: datetime
+    relevance_score: float | None = None
+    final_score: float | None = None
+    match_details: str | None = None
 
 
 class PriceEstimate(BaseModel):
+    """
+    A fair-price estimate. Every deal decision divides by `median_price`, so an
+    implausible value here becomes a week of wrong alerts — it is validated at
+    construction regardless of which source produced it.
+    """
     item_name: str
-    median_price: float
-    low_price: float | None = None
-    high_price: float | None = None
+    median_price: float = Field(..., gt=0)
+    low_price: float | None = Field(None, ge=0)
+    high_price: float | None = Field(None, ge=0)
     sample_count: int
     source: PriceSource
     estimated_at: datetime
     sold_prices: list[float] = []
+
+    @model_validator(mode="after")
+    def _check_band(self):
+        if self.low_price is not None and self.low_price > self.median_price:
+            raise ValueError(
+                f"low_price {self.low_price} exceeds median_price {self.median_price}"
+            )
+        if self.high_price is not None and self.high_price < self.median_price:
+            raise ValueError(
+                f"high_price {self.high_price} is below median_price {self.median_price}"
+            )
+        return self
 
 
 class ScanResult(BaseModel):

@@ -34,6 +34,7 @@ class FBListing:
     link: str
     thumbnail: str | None = None
     location: str | None = None
+    description: str | None = None
 
 
 def _get_location_slug(location: str) -> str:
@@ -100,7 +101,7 @@ async def scrape_fb_marketplace(
     state_path = settings.fb_state_resolved
 
     if not state_path.exists():
-        logger.error("No Facebook session found. Run 'sniper init' first.")
+        logger.error("No Facebook session found. Run 'marketswipe init' first.")
         raise RuntimeError("Facebook session not found. Please log in first via /api/auth/fb-init")
 
     location_slug = _get_location_slug(location)
@@ -233,6 +234,137 @@ async def scrape_fb_marketplace(
             await browser.close()
 
     return listings
+
+
+# Copy that brackets the description in the listing's main column. Picking the
+# longest text block instead pulls in "related listings" from the sidebar —
+# verified live, where a PS5 page yielded "Patio Bar Height Table with Chairs".
+_DESC_START = "Listed "
+_DESC_END = "Location is approximate"
+
+
+async def _read_description(page) -> str | None:
+    """
+    Pull the description off an already-loaded listing page.
+
+    og:description carries exactly the seller's text and needs no DOM
+    archaeology, so it is tried first; the positional scan is the fallback for
+    when the tag is absent.
+    """
+    try:
+        meta = await page.query_selector('meta[property="og:description"]')
+        if meta:
+            content = (await meta.get_attribute("content") or "").strip()
+            if content:
+                return content[:4000]
+    except Exception:
+        pass
+
+    try:
+        elements = await page.query_selector_all('div[role="main"] span[dir="auto"]')
+    except Exception:
+        return None
+
+    texts = []
+    for el in elements:
+        try:
+            text = (await el.inner_text()).strip()
+        except Exception:
+            continue
+        if text:
+            texts.append(text)
+
+    return pick_description(texts)
+
+
+def pick_description(texts: list[str]) -> str | None:
+    """
+    Choose the seller's description from a listing page's text blocks.
+
+    Anchored to the copy bracketing the main column rather than to length:
+    sidebar suggestions are frequently longer than the real description.
+    """
+    start = next((i for i, t in enumerate(texts) if t.startswith(_DESC_START)), None)
+    end = next((i for i, t in enumerate(texts) if _DESC_END in t), None)
+    if start is None or end is None or end <= start:
+        return None
+
+    block = [t for t in texts[start + 1:end] if len(t) > 10]
+    return max(block, key=len)[:4000] if block else None
+
+
+async def fetch_listing_descriptions(fb_ids: list[str], limit: int = 20) -> dict[str, str]:
+    """
+    Fetch description text for specific listings.
+
+    One detail page per listing is expensive and raises bot-detection risk, so
+    callers should pass only the listings whose outcome the body can change —
+    not every search result. Returns {fb_id: description} for those that worked;
+    a listing missing from the result simply has no description.
+    """
+    state_path = settings.fb_state_resolved
+    if not state_path.exists():
+        raise RuntimeError("Facebook session not found. Please log in first via /api/auth/fb-init")
+
+    targets = fb_ids[:limit]
+    if len(fb_ids) > limit:
+        logger.warning(
+            "Fetching descriptions for {} of {} listings (limit={}); the rest are scored on title alone",
+            limit, len(fb_ids), limit,
+        )
+    if not targets:
+        return {}
+
+    descriptions: dict[str, str] = {}
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(
+            headless=True,
+            args=["--no-sandbox", "--disable-dev-shm-usage"],
+        )
+        try:
+            context = await browser.new_context(
+                storage_state=str(state_path),
+                viewport={"width": 1280, "height": 800},
+            )
+            page = await context.new_page()
+            await Stealth().apply_stealth_async(page)
+
+            for fb_id in targets:
+                try:
+                    await page.goto(
+                        f"https://www.facebook.com/marketplace/item/{fb_id}/",
+                        wait_until="domcontentloaded",
+                        timeout=20000,
+                    )
+                    if "/login" in page.url:
+                        logger.error("Facebook session expired while fetching descriptions")
+                        break
+                    await page.wait_for_timeout(random.randint(1500, 3000))
+
+                    # "See more" reveals the full body when it is truncated
+                    for label in ("See more", "See More"):
+                        try:
+                            more = await page.query_selector(f'div[role="button"]:has-text("{label}")')
+                            if more:
+                                await more.click(timeout=2000)
+                                await page.wait_for_timeout(500)
+                                break
+                        except Exception:
+                            pass
+
+                    description = await _read_description(page)
+                    if description:
+                        descriptions[fb_id] = description
+                except Exception as e:
+                    logger.debug("Failed to fetch description for {}: {}", fb_id, e)
+                    continue
+
+            logger.info("Fetched {} of {} listing descriptions", len(descriptions), len(targets))
+        finally:
+            await browser.close()
+
+    return descriptions
 
 
 def _extract_graphql_listings(data: dict, results: list[dict]):

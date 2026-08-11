@@ -52,7 +52,7 @@ def send_deal_email(
             View on Facebook Marketplace
         </a>
         <p style="color: #9ca3af; font-size: 12px; margin-top: 24px;">
-            FB Marketplace Sniper
+            MarketSwipe
         </p>
     </body>
     </html>

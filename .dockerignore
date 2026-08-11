@@ -6,6 +6,6 @@ __pycache__
 *.pyc
 .pytest_cache
 .env
-sniper.db
+marketswipe.db
 .claude
 .git

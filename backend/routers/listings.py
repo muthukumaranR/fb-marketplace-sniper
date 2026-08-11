@@ -1,3 +1,5 @@
+from typing import Literal
+
 from fastapi import APIRouter
 
 from backend import db
@@ -12,8 +14,9 @@ async def get_listings(
     deal_quality: str | None = None,
     limit: int = 100,
     offset: int = 0,
+    sort: Literal["final", "relevance", "deal", "price", "recent"] = "recent",
 ):
-    return await db.get_listings(item_name, deal_quality, limit, offset)
+    return await db.get_listings(item_name, deal_quality, limit, offset, sort)
 
 
 @router.get("/dashboard", response_model=DashboardStats)

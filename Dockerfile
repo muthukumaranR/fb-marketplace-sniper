@@ -44,7 +44,7 @@ COPY --from=frontend-build /app/frontend/dist /app/frontend/dist
 
 # Data volume for SQLite + FB session
 VOLUME /app/data
-ENV DB_PATH=/app/data/sniper.db
+ENV DB_PATH=/app/data/marketswipe.db
 ENV FB_STATE_PATH=/app/data/fb_state.json
 
 EXPOSE 8000
